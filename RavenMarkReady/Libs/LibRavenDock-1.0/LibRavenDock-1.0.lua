@@ -4,13 +4,14 @@ Docking/undocking, slot layout, and badges for the RavenMark suite.
 Pure UI library: knows nothing about raid data.
 
 Slot vocabulary (logical, not pixel coordinates):
-  "left-upper", "left-lower", "right-upper", "right-lower", "strip"
+  "left-upper", "left-lower", "right-upper", "right-lower"
 
 Capacity rule: at most two panels are expanded at once (left-upper/left-lower
-are the auto-assigned pair). Anything past the cap -- and any module whose
-requested slot is taken -- queues into the strip (the collapsed status area
-under the Rail) until a slot frees, at which point the oldest strip occupant
-is promoted.
+are the auto-assigned pair). A collapsed module is simply hidden -- it is still
+represented by its tab on the Rail, so clicking that tab brings it back. There
+is no separate on-screen tray; the Rail tab is the single launcher. Clicking a
+tab when both slots are full expands that module and evicts the longest-docked
+panel (collapsing it) to make room.
 
 Standalone fallback: if RavenMark Core (the Rail) is not installed when
 RegisterModule is called, all dock logic is skipped and the module frame
@@ -20,7 +21,7 @@ The calling addon gets a working handle either way and never needs to know
 which path it got.
 ------------------------------------------------------------------------------]]
 
-local MAJOR, MINOR = "LibRavenDock-1.0", 2
+local MAJOR, MINOR = "LibRavenDock-1.0", 3
 assert(LibStub, MAJOR .. " requires LibStub.")
 local Dock = LibStub:NewLibrary(MAJOR, MINOR)
 if not Dock then return end
@@ -29,8 +30,6 @@ Dock.modules    = Dock.modules    or {}  -- moduleId -> module record
 Dock.order      = Dock.order      or {}  -- registration order of moduleIds
 Dock.callbacks  = Dock.callbacks  or {}  -- event -> { [owner] = fn }
 Dock.slots      = Dock.slots      or {}  -- slot -> moduleId (expanded panels)
-Dock.strip      = Dock.strip      or {}  -- array of moduleIds in the strip
-Dock.stripCells = Dock.stripCells or {}  -- moduleId -> strip cell button
 
 local DEFAULT_SNAP = 40
 local MAX_EXPANDED = 2
@@ -42,10 +41,6 @@ local SLOT_POINTS = {
     ["right-lower"] = { point = "BOTTOMLEFT", relPoint = "BOTTOMRIGHT", x = 330, y = 0 },
 }
 local SLOT_ORDER = { "left-upper", "left-lower", "right-upper", "right-lower" }
-
-local function indexOf(t, v)
-    for i = 1, #t do if t[i] == v then return i end end
-end
 
 ---------------------------------------------------------------- callbacks ----
 
@@ -96,10 +91,11 @@ local function SaveState(m)
 end
 
 -- Pick the slot a module should expand into: saved slot first, then the
--- requested/default slot, then the first free auto slot. nil means "strip".
+-- requested/default slot, then the first free auto slot. nil means no slot is
+-- free, so the caller collapses (hides) the module instead.
 -- Deliberately does NOT consult the saved collapsed flag: that flag is only
 -- honored at registration (restoring the login layout). An explicit dock or
--- expand request must be able to pull a module OUT of the strip -- consulting
+-- expand request must be able to bring a collapsed module back -- consulting
 -- it here made collapse a one-way door.
 local function ResolveSlot(m, wanted)
     local saved = Dock.profile and Dock.profile.moduleState and Dock.profile.moduleState[m.id]
@@ -115,79 +111,17 @@ local function ResolveSlot(m, wanted)
     return nil
 end
 
-------------------------------------------------------------------- strip -----
-
-local function EnsureStripFrame()
-    if Dock.stripFrame or not Dock.rail then return end
-    local Chrome = LibStub("LibRavenChrome-1.0", true)
-    local f
-    if Chrome then
-        f = Chrome:CreatePanel(UIParent, { width = 70, height = 26, litEdge = true })
-    else
-        f = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
-        f:SetSize(70, 26)
-    end
-    f:SetPoint("TOPLEFT", Dock.rail, "BOTTOMLEFT", 0, -8)
-    f:Hide()
-    Dock.stripFrame = f
-end
-
-local function LayoutStrip()
-    if not Dock.stripFrame then return end
-    local shown = 0
-    for i, id in ipairs(Dock.strip) do
-        local m = Dock.modules[id]
-        local cell = Dock.stripCells[id]
-        if not cell then
-            cell = CreateFrame("Button", nil, Dock.stripFrame, "BackdropTemplate")
-            cell:SetSize(58, 20)
-            cell:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
-            cell:SetBackdropColor(0.094, 0.129, 0.169, 0.95)
-            cell:SetBackdropBorderColor(0.310, 0.847, 1.0, 0.3)
-            cell.label = cell:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            cell.label:SetPoint("CENTER")
-            cell.moduleId = id
-            cell:SetScript("OnClick", function(self) Dock:ToggleModule(self.moduleId) end)
-            cell:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-                local mod = Dock.modules[self.moduleId]
-                GameTooltip:SetText((mod.opts.displayName or self.moduleId) .. " (click to expand)")
-                GameTooltip:Show()
-            end)
-            cell:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            Dock.stripCells[id] = cell
-            -- let the module draw its own mini-panel content once, if it wants
-            if m.opts.onCollapseDraw then pcall(m.opts.onCollapseDraw, cell) end
-        end
-        local badge = m.badge
-        if not badge and m.opts.badgeProvider then
-            local ok, n = pcall(m.opts.badgeProvider)
-            if ok then badge = n end
-        end
-        cell.label:SetText((m.opts.shortLabel or "?") .. (badge and badge ~= 0 and (" " .. badge) or ""))
-        cell:ClearAllPoints()
-        cell:SetPoint("LEFT", Dock.stripFrame, "LEFT", 6 + (i - 1) * 62, 0)
-        cell:Show()
-        shown = shown + 1
-    end
-    for id, cell in pairs(Dock.stripCells) do
-        if not indexOf(Dock.strip, id) then cell:Hide() end
-    end
-    Dock.stripFrame:SetWidth(math.max(70, 12 + shown * 62))
-    Dock.stripFrame:SetShown(shown > 0)
-end
-
 ---------------------------------------------------------------- dock core ----
 
-local function SendToStrip(m)
-    if not Dock.rail then m.frame:Show() return end -- standalone: nothing to queue into
+-- Collapse = hide the panel. It stays "docked" (owned by the Rail and
+-- reachable via its tab), just not shown, and frees its slot. There is no
+-- visible tray; the Rail tab is the way back.
+local function CollapseModule(m)
+    if not Dock.rail then m.frame:Show() return end -- standalone: nothing to collapse into
     local wasExpanded = m.docked and not m.collapsed
     if m.slot and Dock.slots[m.slot] == m.id then Dock.slots[m.slot] = nil end
-    m.docked, m.collapsed, m.slot = true, true, "strip"
+    m.docked, m.collapsed, m.slot = true, true, nil
     m.frame:Hide()
-    if not indexOf(Dock.strip, m.id) then Dock.strip[#Dock.strip + 1] = m.id end
-    EnsureStripFrame()
-    LayoutStrip()
     SaveState(m)
     if wasExpanded or not m._announcedCollapse then
         m._announcedCollapse = true
@@ -195,20 +129,15 @@ local function SendToStrip(m)
     end
 end
 
-local function RemoveFromStrip(m)
-    local i = indexOf(Dock.strip, m.id)
-    if i then table.remove(Dock.strip, i) end
-    LayoutStrip()
-end
-
 local function DockModule(m, slot)
     if not Dock.rail then return end
     slot = slot or ResolveSlot(m, m.opts.defaultSlot)
-    if not slot or slot == "strip" then return SendToStrip(m) end
-    if Dock.slots[slot] and Dock.slots[slot] ~= m.id then return SendToStrip(m) end
+    -- No slot available (both expand slots full, or requested slot taken):
+    -- collapse to hidden rather than force it on screen.
+    if not slot or not SLOT_POINTS[slot] then return CollapseModule(m) end
+    if Dock.slots[slot] and Dock.slots[slot] ~= m.id then return CollapseModule(m) end
 
     local wasCollapsed = m.collapsed
-    RemoveFromStrip(m)
     if m.slot and m.slot ~= slot and Dock.slots[m.slot] == m.id then Dock.slots[m.slot] = nil end
     Dock.slots[slot] = m.id
     m.docked, m.collapsed, m.slot = true, false, slot
@@ -225,23 +154,12 @@ local function DockModule(m, slot)
     if wasCollapsed then Fire("OnExpand", m.id) end
 end
 
--- Promote the oldest strip occupant into a freed slot.
-local function PromoteFromStrip(slot)
-    if #Dock.strip == 0 or ExpandedCount() >= MAX_EXPANDED then return end
-    local id = Dock.strip[1]
-    local m = Dock.modules[id]
-    if m then DockModule(m, (slot and not Dock.slots[slot]) and slot or nil) end
-end
-
 -- Float the frame at its current on-screen position (or center) as an
 -- ordinary movable window.
-local function FloatModule(m, skipPromote)
-    local freed
+local function FloatModule(m)
     if m.slot and Dock.slots[m.slot] == m.id then
         Dock.slots[m.slot] = nil
-        freed = m.slot
     end
-    RemoveFromStrip(m)
     m.docked, m.collapsed, m.slot = false, false, nil
 
     local f = m.frame
@@ -258,7 +176,6 @@ local function FloatModule(m, skipPromote)
     f:Show()
     SaveState(m)
     Fire("OnUndock", m.id)
-    if freed and not skipPromote then PromoteFromStrip(freed) end
 end
 
 ------------------------------------------------------------- drag / snap -----
@@ -333,7 +250,7 @@ local function SetupDraggable(m, dockAware)
     f:SetScript("OnDragStart", function(self)
         self:StartMoving()
         if dockAware then
-            if m.docked and not m.collapsed then FloatModule(m, true) end
+            if m.docked and not m.collapsed then FloatModule(m) end
             StartSnapWatch(m)
         end
     end)
@@ -346,7 +263,6 @@ local function SetupDraggable(m, dockAware)
                 Dock.pendingSlot = nil
                 return
             end
-            PromoteFromStrip()
         end
         local pos = m.opts.savedPosition
         if pos then
@@ -365,7 +281,6 @@ Handle.__index = Handle
 function Handle:SetBadge(n)
     local m = self._m
     m.badge = n
-    if m.collapsed then LayoutStrip() end
     Fire("OnBadge", m.id, n)
 end
 
@@ -376,7 +291,7 @@ function Handle:SetCollapsed(collapsed)
         return
     end
     if collapsed then
-        SendToStrip(m)
+        CollapseModule(m)
     else
         DockModule(m)
     end
@@ -418,7 +333,6 @@ function Dock:AttachRail(railFrame, coreDB, profile)
     self.profile = profile
     railFrame:HookScript("OnShow", function() Fire("OnRailShown") end)
     railFrame:HookScript("OnHide", function() Fire("OnRailHidden") end)
-    EnsureStripFrame()
 end
 
 function Dock:HasRail()
@@ -456,10 +370,11 @@ function Dock:RegisterModule(moduleId, opts)
         SetupDraggable(m, true)
         local saved = self.profile and self.profile.moduleState and self.profile.moduleState[moduleId]
         if saved and saved.floating then
-            FloatModule(m, true)
+            FloatModule(m)
         elseif saved and saved.collapsed then
-            -- restore last session's layout: this module stays in the strip
-            SendToStrip(m)
+            -- restore last session's layout: this module stays hidden until
+            -- its Rail tab is clicked
+            CollapseModule(m)
         else
             DockModule(m, ResolveSlot(m, opts.defaultSlot))
         end
@@ -491,8 +406,9 @@ function Dock:GetModuleOrder()
     return out
 end
 
--- Rail tab / strip cell click behavior: expanded -> strip; anything else ->
--- try to expand, evicting the longest-docked panel if both slots are full.
+-- Rail tab click behavior: an expanded panel collapses (hides); anything else
+-- expands, evicting (collapsing) the longest-docked panel if both slots are
+-- full.
 function Dock:ToggleModule(moduleId)
     local m = self.modules[moduleId]
     if not m then return end
@@ -501,7 +417,7 @@ function Dock:ToggleModule(moduleId)
         return
     end
     if m.docked and not m.collapsed then
-        SendToStrip(m)
+        CollapseModule(m)
         return
     end
     local slot = ResolveSlot(m, m.opts.defaultSlot)
@@ -515,7 +431,7 @@ function Dock:ToggleModule(moduleId)
             end
         end
         if oldestId then
-            SendToStrip(self.modules[oldestId])
+            CollapseModule(self.modules[oldestId])
             slot = oldestSlot
         end
     end
