@@ -1,0 +1,15 @@
+## Interface: 120007
+## Title: RavenMark |cff4fd8ffReady|r
+## Notes: Pre-pull flask/food/durability check, on demand. Part of the RavenMark suite.
+## Author: CypressSwampStudios
+## Version: 0.1.0
+## SavedVariables: RavenMarkReadyDB
+## OptionalDeps: RavenMarkCore
+
+Libs\LibStub\LibStub.lua
+Libs\LibRavenExport-1.0\LibRavenExport-1.0.lua
+Libs\LibRavenChrome-1.0\LibRavenChrome-1.0.lua
+Libs\LibRavenDock-1.0\LibRavenDock-1.0.lua
+
+Ready.lua
+ReadyUI.lua

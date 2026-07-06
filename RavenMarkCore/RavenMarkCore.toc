@@ -1,0 +1,15 @@
+## Interface: 120007
+## Title: RavenMark |cff4fd8ffCore|r
+## Notes: The Rail — dock shell and settings for the RavenMark suite. Optional; every module works standalone without it.
+## Author: CypressSwampStudios
+## Version: 0.1.0
+## SavedVariables: RavenMarkCoreDB
+
+Libs\LibStub\LibStub.lua
+Libs\LibRavenExport-1.0\LibRavenExport-1.0.lua
+Libs\LibRavenChrome-1.0\LibRavenChrome-1.0.lua
+Libs\LibRavenDock-1.0\LibRavenDock-1.0.lua
+
+Core.lua
+Rail.lua
+Options.lua
