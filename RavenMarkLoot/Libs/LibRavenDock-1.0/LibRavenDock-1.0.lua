@@ -20,7 +20,7 @@ The calling addon gets a working handle either way and never needs to know
 which path it got.
 ------------------------------------------------------------------------------]]
 
-local MAJOR, MINOR = "LibRavenDock-1.0", 1
+local MAJOR, MINOR = "LibRavenDock-1.0", 2
 assert(LibStub, MAJOR .. " requires LibStub.")
 local Dock = LibStub:NewLibrary(MAJOR, MINOR)
 if not Dock then return end
@@ -95,11 +95,14 @@ local function SaveState(m)
     end
 end
 
--- Pick the slot a module should expand into: saved state first, then the
+-- Pick the slot a module should expand into: saved slot first, then the
 -- requested/default slot, then the first free auto slot. nil means "strip".
+-- Deliberately does NOT consult the saved collapsed flag: that flag is only
+-- honored at registration (restoring the login layout). An explicit dock or
+-- expand request must be able to pull a module OUT of the strip -- consulting
+-- it here made collapse a one-way door.
 local function ResolveSlot(m, wanted)
     local saved = Dock.profile and Dock.profile.moduleState and Dock.profile.moduleState[m.id]
-    if saved and saved.collapsed then return nil end
     local candidates = {}
     if saved and saved.slot and SLOT_POINTS[saved.slot] then candidates[#candidates + 1] = saved.slot end
     if wanted and SLOT_POINTS[wanted] then candidates[#candidates + 1] = wanted end
@@ -454,6 +457,9 @@ function Dock:RegisterModule(moduleId, opts)
         local saved = self.profile and self.profile.moduleState and self.profile.moduleState[moduleId]
         if saved and saved.floating then
             FloatModule(m, true)
+        elseif saved and saved.collapsed then
+            -- restore last session's layout: this module stays in the strip
+            SendToStrip(m)
         else
             DockModule(m, ResolveSlot(m, opts.defaultSlot))
         end
