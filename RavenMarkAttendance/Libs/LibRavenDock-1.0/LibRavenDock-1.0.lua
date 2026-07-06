@@ -21,7 +21,7 @@ The calling addon gets a working handle either way and never needs to know
 which path it got.
 ------------------------------------------------------------------------------]]
 
-local MAJOR, MINOR = "LibRavenDock-1.0", 3
+local MAJOR, MINOR = "LibRavenDock-1.0", 4
 assert(LibStub, MAJOR .. " requires LibStub.")
 local Dock = LibStub:NewLibrary(MAJOR, MINOR)
 if not Dock then return end
@@ -34,13 +34,20 @@ Dock.slots      = Dock.slots      or {}  -- slot -> moduleId (expanded panels)
 local DEFAULT_SNAP = 40
 local MAX_EXPANDED = 2
 
-local SLOT_POINTS = {
-    ["left-upper"]  = { point = "TOPLEFT",    relPoint = "TOPRIGHT",    x = 10,  y = 0 },
-    ["left-lower"]  = { point = "BOTTOMLEFT", relPoint = "BOTTOMRIGHT", x = 10,  y = 0 },
-    ["right-upper"] = { point = "TOPLEFT",    relPoint = "TOPRIGHT",    x = 330, y = 0 },
-    ["right-lower"] = { point = "BOTTOMLEFT", relPoint = "BOTTOMRIGHT", x = 330, y = 0 },
-}
+-- Every panel docks the same way: its TOPLEFT pins near the Rail's top and it
+-- grows downward. Each side (left/right of the Rail) is a column; the "lower"
+-- row sits directly beneath the "upper" row on the same side, so panels never
+-- overlap and every one grows in the same direction. Panel heights vary, so
+-- the lower row anchors to the upper panel's frame rather than a fixed pixel
+-- offset (see AnchorToSlot / RelayoutDocked).
 local SLOT_ORDER = { "left-upper", "left-lower", "right-upper", "right-lower" }
+local SLOT_SIDE  = {
+    ["left-upper"]  = "left",  ["left-lower"]  = "left",
+    ["right-upper"] = "right", ["right-lower"] = "right",
+}
+local UPPER_OF   = { ["left-lower"] = "left-upper", ["right-lower"] = "right-upper" }
+local SIDE_X     = { left = 10, right = 330 }
+local PANEL_GAP  = 8
 
 ---------------------------------------------------------------- callbacks ----
 
@@ -100,8 +107,8 @@ end
 local function ResolveSlot(m, wanted)
     local saved = Dock.profile and Dock.profile.moduleState and Dock.profile.moduleState[m.id]
     local candidates = {}
-    if saved and saved.slot and SLOT_POINTS[saved.slot] then candidates[#candidates + 1] = saved.slot end
-    if wanted and SLOT_POINTS[wanted] then candidates[#candidates + 1] = wanted end
+    if saved and saved.slot and SLOT_SIDE[saved.slot] then candidates[#candidates + 1] = saved.slot end
+    if wanted and SLOT_SIDE[wanted] then candidates[#candidates + 1] = wanted end
     for _, s in ipairs(SLOT_ORDER) do candidates[#candidates + 1] = s end
     for _, slot in ipairs(candidates) do
         if not Dock.slots[slot] and ExpandedCount() < MAX_EXPANDED then
@@ -109,6 +116,36 @@ local function ResolveSlot(m, wanted)
         end
     end
     return nil
+end
+
+-- Anchor one frame (a real panel, or the drag preview) to a slot: top of the
+-- column pins to the Rail's top-right; the lower row pins beneath the upper
+-- panel on the same side when that panel is present. Always TOPLEFT-anchored,
+-- so everything grows downward.
+local function AnchorToSlot(frame, slot)
+    frame:ClearAllPoints()
+    local side = SLOT_SIDE[slot]
+    local upperSlot = UPPER_OF[slot]
+    local upperId = upperSlot and Dock.slots[upperSlot]
+    local upper = upperId and Dock.modules[upperId]
+    if upper and upper.frame ~= frame and upper.frame:IsShown() then
+        frame:SetPoint("TOPLEFT", upper.frame, "BOTTOMLEFT", 0, -PANEL_GAP)
+    else
+        frame:SetPoint("TOPLEFT", Dock.rail, "TOPRIGHT", SIDE_X[side], 0)
+    end
+end
+
+-- Re-anchor every expanded panel. Cheap, and keeps the columns correct after
+-- any dock/undock/collapse (e.g. removing an upper panel slides its lower
+-- neighbor up to the top).
+local function RelayoutDocked()
+    if not Dock.rail then return end
+    for _, slot in ipairs(SLOT_ORDER) do
+        local id = Dock.slots[slot]
+        if id and Dock.modules[id] then
+            AnchorToSlot(Dock.modules[id].frame, slot)
+        end
+    end
 end
 
 ---------------------------------------------------------------- dock core ----
@@ -122,6 +159,7 @@ local function CollapseModule(m)
     if m.slot and Dock.slots[m.slot] == m.id then Dock.slots[m.slot] = nil end
     m.docked, m.collapsed, m.slot = true, true, nil
     m.frame:Hide()
+    RelayoutDocked()
     SaveState(m)
     if wasExpanded or not m._announcedCollapse then
         m._announcedCollapse = true
@@ -134,7 +172,7 @@ local function DockModule(m, slot)
     slot = slot or ResolveSlot(m, m.opts.defaultSlot)
     -- No slot available (both expand slots full, or requested slot taken):
     -- collapse to hidden rather than force it on screen.
-    if not slot or not SLOT_POINTS[slot] then return CollapseModule(m) end
+    if not slot or not SLOT_SIDE[slot] then return CollapseModule(m) end
     if Dock.slots[slot] and Dock.slots[slot] ~= m.id then return CollapseModule(m) end
 
     local wasCollapsed = m.collapsed
@@ -144,11 +182,8 @@ local function DockModule(m, slot)
     m.dockTime = GetTime and GetTime() or 0
     m._announcedCollapse = false
 
-    local def = SLOT_POINTS[slot]
-    local f = m.frame
-    f:ClearAllPoints()
-    f:SetPoint(def.point, Dock.rail, def.relPoint, def.x, def.y)
-    f:Show()
+    m.frame:Show()
+    RelayoutDocked()
     SaveState(m)
     Fire("OnDock", m.id, slot)
     if wasCollapsed then Fire("OnExpand", m.id) end
@@ -157,7 +192,8 @@ end
 -- Float the frame at its current on-screen position (or center) as an
 -- ordinary movable window.
 local function FloatModule(m)
-    if m.slot and Dock.slots[m.slot] == m.id then
+    local wasDocked = m.slot and Dock.slots[m.slot] == m.id
+    if wasDocked then
         Dock.slots[m.slot] = nil
     end
     m.docked, m.collapsed, m.slot = false, false, nil
@@ -174,6 +210,7 @@ local function FloatModule(m)
         f:SetPoint("CENTER")
     end
     f:Show()
+    if wasDocked then RelayoutDocked() end -- slide the remaining panel up
     SaveState(m)
     Fire("OnUndock", m.id)
 end
@@ -191,23 +228,36 @@ local function EnsurePreview()
     Dock.preview = p
 end
 
+-- Screen coords of a slot's TOPLEFT anchor, matching AnchorToSlot so the snap
+-- preview and the eventual dock land in the same place.
+local function SlotTargetTopLeft(slot)
+    if not Dock.rail then return nil end
+    local railRight, railTop = Dock.rail:GetRight(), Dock.rail:GetTop()
+    if not railRight then return nil end
+    local x = railRight + SIDE_X[SLOT_SIDE[slot]]
+    local upperSlot = UPPER_OF[slot]
+    local upperId = upperSlot and Dock.slots[upperSlot]
+    local upper = upperId and Dock.modules[upperId]
+    if upper and upper.frame:IsShown() then
+        local bottom = upper.frame:GetBottom()
+        if bottom then return x, bottom - PANEL_GAP end
+    end
+    return x, railTop
+end
+
 -- Nearest open expanded slot within the snap threshold of the dragged frame,
--- or nil. Measured corner-to-corner in UIParent coordinates.
+-- or nil. Measured TOPLEFT corner to TOPLEFT anchor in screen coordinates.
 function Dock:NearestOpenSlot(frame)
     if not self.rail or not self.rail:IsShown() then return nil end
     if ExpandedCount() >= MAX_EXPANDED then return nil end
     local threshold = SnapThreshold()
-    local railRight, railTop, railBottom = self.rail:GetRight(), self.rail:GetTop(), self.rail:GetBottom()
-    if not railRight then return nil end
+    local fx, fy = frame:GetLeft(), frame:GetTop()
+    if not fx then return nil end
     local best, bestDist
     for _, slot in ipairs(SLOT_ORDER) do
         if not self.slots[slot] then
-            local def = SLOT_POINTS[slot]
-            local tx = railRight + def.x
-            local ty = (def.relPoint == "TOPRIGHT") and (railTop + def.y) or (railBottom + def.y)
-            local fx = frame:GetLeft()
-            local fy = (def.point == "TOPLEFT") and frame:GetTop() or frame:GetBottom()
-            if fx and fy then
+            local tx, ty = SlotTargetTopLeft(slot)
+            if tx then
                 local d = math.sqrt((fx - tx) ^ 2 + (fy - ty) ^ 2)
                 if d <= threshold and (not bestDist or d < bestDist) then
                     best, bestDist = slot, d
@@ -225,10 +275,8 @@ local function StartSnapWatch(m)
         local slot = Dock:NearestOpenSlot(m.frame)
         Dock.pendingSlot = slot
         if slot then
-            local def = SLOT_POINTS[slot]
-            Dock.preview:ClearAllPoints()
             Dock.preview:SetSize(m.frame:GetWidth(), m.frame:GetHeight())
-            Dock.preview:SetPoint(def.point, Dock.rail, def.relPoint, def.x, def.y)
+            AnchorToSlot(Dock.preview, slot)
             Dock.preview:Show()
         else
             Dock.preview:Hide()
@@ -303,8 +351,8 @@ end
 
 function Handle:GetAnchor()
     local m = self._m
-    if m.docked and m.slot and SLOT_POINTS[m.slot] and Dock.rail then
-        return Dock.rail, SLOT_POINTS[m.slot].relPoint
+    if m.docked and m.slot and SLOT_SIDE[m.slot] and Dock.rail then
+        return Dock.rail, "TOPRIGHT"
     end
     local point = m.frame:GetPoint(1)
     return UIParent, point or "CENTER"
@@ -319,7 +367,7 @@ end
 function Handle:RequestDock(slot)
     local m = self._m
     if m.standalone then return end -- no Rail in this environment; nothing to dock to
-    DockModule(m, slot and SLOT_POINTS[slot] and slot or nil)
+    DockModule(m, slot and SLOT_SIDE[slot] and slot or nil)
 end
 
 --------------------------------------------------------------- public API ----
